@@ -1,8 +1,9 @@
 """
 title: Lemonade Control Panel
 author: Sawan Srivastava
-version: 0.1
+version: 0.2
 description: Open WebUI Plugin for Querying Lemonade Server Endpoints
+
 """
 
 import json
@@ -70,6 +71,9 @@ class Action:
         base_url = self.valves.BASE_URL.rstrip("/")
         base_v1 = f"{base_url}/api/v1"
         endpoint_key = ""
+
+        if __user__["role"] != "admin":
+            return {"content": "This action requires admin privileges"}
 
         await self._emit_status(__event_emitter__, "Waiting for input...", False)
 
@@ -245,6 +249,9 @@ class Action:
                 target_url = route_map.get(endpoint_key, f"{base_v1}/{endpoint_key}")
 
             await self._emit_status(
+                __event_emitter__, f"Executing {endpoint_key}...", False
+            )
+            await self._emit_notification(
                 __event_emitter__, f"Executing {endpoint_key}...", False
             )
 
