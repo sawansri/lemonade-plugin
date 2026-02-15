@@ -1,8 +1,8 @@
 """
 title: Lemonade Control Panel
-author: Open WebUI
-version: 0.3.3
-description: Interactive panel. Empty input runs a full system overview. Smart timeouts for Pull (30m) and Delete (3m).
+author: Sawan Srivastava
+version: 0.1
+description: Open WebUI Plugin for Querying Lemonade Server Endpoints
 """
 
 import json
