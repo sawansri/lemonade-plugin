@@ -1,6 +1,6 @@
 # Lemonade Control Panel
 
-A simple Open WebUI Action for managing Lemonade model servers.
+A simple Open WebUI Action for managing [Lemonade Server](https://lemonade-server.ai/) instances.
 
 ## Features
 
