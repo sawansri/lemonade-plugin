@@ -53,16 +53,24 @@ class Action:
                 downloaded = "[Downloaded]" if m.get("downloaded") else ""
                 lines.append(f"• {m_id} ({size}GB) {downloaded}")
             limit = 30
-            return "\n".join(lines[:limit]) + ("\n... (and more)" if len(lines) > limit else "")
+            return "\n".join(lines[:limit]) + (
+                "\n... (and more)" if len(lines) > limit else ""
+            )
         except Exception:
             return "Could not parse model list."
 
-    def _generate_gauge_html(self, label: str, value: float, max_val: float, unit: str) -> str:
+    # --- Visualization Generators ---
+
+    def _generate_gauge_html(
+        self, label: str, value: float, max_val: float, unit: str
+    ) -> str:
         percent = min(100, max(0, (value / max_val) * 100)) if max_val > 0 else 0
         color = "#ef4444"
-        if percent > 30: color = "#eab308"
-        if percent > 70: color = "#22c55e"
-        
+        if percent > 30:
+            color = "#eab308"
+        if percent > 70:
+            color = "#22c55e"
+
         return f"""
         <div style="margin-bottom: 8px;">
             <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#94a3b8; margin-bottom:2px;">
@@ -87,7 +95,9 @@ class Action:
         </div>
         """
 
-    def _build_result_html(self, title: str, badge: str, content: str, is_error: bool = False) -> str:
+    def _build_result_html(
+        self, title: str, badge: str, content: str, is_error: bool = False
+    ) -> str:
         """Simple wrapper for command results (Pull/Delete response)."""
         color = "#ef4444" if is_error else "#22c55e"
         return f"""
@@ -106,7 +116,9 @@ class Action:
         </div>
         """
 
-    def _build_dashboard_html(self, health: dict, stats: dict, system: dict, models: dict) -> str:
+    def _build_dashboard_html(
+        self, health: dict, stats: dict, system: dict, models: dict
+    ) -> str:
         """The main Dashboard generator."""
         unique_id = f"lemon_{id(health)}"
         
@@ -116,10 +128,16 @@ class Action:
         devices = system.get("devices", {})
         
         badges = []
-        if devices.get("npu", {}).get("available"): badges.append('<span class="badge badge-npu">NPU DETECTED</span>')
+        if devices.get("npu", {}).get("available"):
+            badges.append('<span class="badge badge-npu">NPU DETECTED</span>')
         gpu_list = devices.get("amd_dgpu", []) + devices.get("nvidia_dgpu", [])
-        if gpu_list or devices.get("amd_igpu", {}).get("available"): badges.append('<span class="badge badge-gpu">GPU ACTIVE</span>')
-        badges_html = " ".join(badges) if badges else '<span class="badge" style="opacity:0.5">CPU ONLY</span>'
+        if gpu_list or devices.get("amd_igpu", {}).get("available"):
+            badges.append('<span class="badge badge-gpu">GPU ACTIVE</span>')
+        badges_html = (
+            " ".join(badges)
+            if badges
+            else '<span class="badge" style="opacity:0.5">CPU ONLY</span>'
+        )
 
         tps = stats.get("tokens_per_second", 0)
         ttft = stats.get("time_to_first_token", 0)
@@ -128,7 +146,7 @@ class Action:
         output_tokens = stats.get("output_tokens", 0)
         decode_times = stats.get("decode_token_times", [])
         avg_decode = (sum(decode_times) / len(decode_times)) if decode_times else 0
-        
+
         tps_fmt = f"{tps:.3f}"
         ttft_fmt = f"{ttft:.4f}"
         avg_decode_fmt = f"{avg_decode:.4f}"
@@ -239,6 +257,11 @@ class Action:
         endpoint_key = ""
 
         if __user__["role"] != "admin":
+            await self._emit_notification(
+                __event_emitter__,
+                "Admin privileges required for Lemonade Control.",
+                "error",
+            )
             return {"content": "This action requires admin privileges"}
 
         await self._emit_status(__event_emitter__, "Waiting for input...", False)
@@ -258,88 +281,111 @@ class Action:
             except Exception as e:
                 pass
 
-        async with httpx.AsyncClient(headers={"Connection": "close"}, timeout=self.valves.TIMEOUT_SECONDS) as client:
-            
+        async with httpx.AsyncClient(
+            headers={"Connection": "close"}, timeout=self.valves.TIMEOUT_SECONDS
+        ) as client:
+
             if endpoint_key in ["pull", "delete"]:
                 target_url = f"{base_v1}/{endpoint_key}"
                 payload = {}
-                
-                await self._emit_status(__event_emitter__, f"Fetching info for {endpoint_key}...", False)
-                
+
+                await self._emit_status(
+                    __event_emitter__, f"Fetching info for {endpoint_key}...", False
+                )
+
                 try:
-                    list_url = f"{base_v1}/models" + ("?show_all=true" if endpoint_key == "pull" else "")
+                    list_url = f"{base_v1}/models" + (
+                        "?show_all=true" if endpoint_key == "pull" else ""
+                    )
                     list_resp = await client.get(list_url)
-                    model_list_str = self._format_model_list(list_resp.json()) if list_resp.status_code == 200 else "Error fetching list."
+                    model_list_str = (
+                        self._format_model_list(list_resp.json())
+                        if list_resp.status_code == 200
+                        else "Error fetching list."
+                    )
                 except:
                     model_list_str = "Could not fetch model list."
 
                 if __event_call__:
-                    model_name = await __event_call__({
-                        "type": "input",
-                        "data": {
-                            "title": f"{endpoint_key.title()} Model",
-                            "message": f"Models Available:\n\n{model_list_str}\n\nEnter ID to {endpoint_key}:",
-                            "placeholder": "Qwen3-14B-GGUF"
+                    model_name = await __event_call__(
+                        {
+                            "type": "input",
+                            "data": {
+                                "title": f"{endpoint_key.title()} Model",
+                                "message": f"Models Available:\n\n{model_list_str}\n\nEnter ID to {endpoint_key}:",
+                                "placeholder": "Qwen3-14B-GGUF",
+                            },
                         }
-                    })
+                    )
                     if model_name:
                         payload = {"model_name": model_name.strip()}
                     else:
-                        return body # Cancelled
+                        return body  # Cancelled
 
                 # Execute with LONG Timeout
                 timeout = 1800 if endpoint_key == "pull" else 180
-                await self._emit_status(__event_emitter__, f"Executing {endpoint_key} (Timeout: {timeout}s)...", False)
-                await self._emit_notification(__event_emitter__, f"Executing {endpoint_key} (Timeout: {timeout}s)...", False)
-                
+                await self._emit_status(
+                    __event_emitter__,
+                    f"Executing {endpoint_key} (Timeout: {timeout}s)...",
+                    False,
+                )
+
                 try:
                     resp = await client.post(target_url, json=payload, timeout=timeout)
                     try:
                         resp_json = json.dumps(resp.json(), indent=2)
                     except:
                         resp_json = resp.text
-                    
+
                     html_out = self._build_result_html(
-                        f"{endpoint_key.title()} Result", 
-                        str(resp.status_code), 
-                        resp_json, 
-                        is_error=(resp.status_code >= 400)
+                        f"{endpoint_key.title()} Result",
+                        str(resp.status_code),
+                        resp_json,
+                        is_error=(resp.status_code >= 400),
                     )
                 except Exception as e:
-                    html_out = self._build_result_html("Error", "Fail", str(e), is_error=True)
+                    html_out = self._build_result_html(
+                        "Error", "Fail", str(e), is_error=True
+                    )
 
                 if body.get("messages") and isinstance(body["messages"], list):
                     body["messages"][-1]["content"] += f"\n\n{f'```html{html_out}```'}"
 
             else:
-                await self._emit_status(__event_emitter__, "Fetching Telemetry...", False)
-                
+                await self._emit_status(
+                    __event_emitter__, "Fetching Telemetry...", False
+                )
+
                 results = await asyncio.gather(
                     client.get(f"{base_v1}/health"),
                     client.get(f"{base_v1}/stats"),
                     client.get(f"{base_v1}/system-info"),
                     client.get(f"{base_v1}/models"),
-                    return_exceptions=True
+                    return_exceptions=True,
                 )
-                
+
                 data = []
                 for res in results:
                     if isinstance(res, Exception):
                         data.append({"error": str(res)})
-                    elif hasattr(res, 'status_code') and res.status_code != 200:
-                        data.append({"error": f"HTTP {res.status_code}", "text": res.text})
-                    elif hasattr(res, 'json'):
+                    elif hasattr(res, "status_code") and res.status_code != 200:
+                        data.append(
+                            {"error": f"HTTP {res.status_code}", "text": res.text}
+                        )
+                    elif hasattr(res, "json"):
                         try:
                             data.append(res.json())
                         except:
                             data.append({})
                     else:
                         data.append({})
-                
+
                 health_d, stats_d, system_d, models_d = data
-                
-                html_dash = self._build_dashboard_html(health_d, stats_d, system_d, models_d)
-                
+
+                html_dash = self._build_dashboard_html(
+                    health_d, stats_d, system_d, models_d
+                )
+
                 if body.get("messages") and isinstance(body["messages"], list):
                     body["messages"][-1]["content"] += f"\n\n```html\n{html_dash}\n```"
 
