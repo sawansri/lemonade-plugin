@@ -1,7 +1,7 @@
 """
 title: Lemonade Control Panel
 author: Sawan Srivastava
-version: 0.2
+version: 0.8
 description: Open WebUI Plugin for Querying Lemonade Server Endpoints
 
 """
@@ -50,7 +50,7 @@ class Action:
             for m in models:
                 size = m.get("size", "?")
                 m_id = m.get("id", "Unknown")
-                downloaded = "[DL]" if m.get("downloaded") else ""
+                downloaded = "[Downloaded]" if m.get("downloaded") else ""
                 lines.append(f"• {m_id} ({size}GB) {downloaded}")
             limit = 30
             return "\n".join(lines[:limit]) + ("\n... (and more)" if len(lines) > limit else "")
