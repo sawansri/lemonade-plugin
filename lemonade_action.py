@@ -21,7 +21,7 @@ class Action:
             description="Lemonade server base URL (without /api/v1).",
         )
         TIMEOUT_SECONDS: int = Field(
-            default=20,
+            default=5,
             description="Default timeout for standard API requests (health, stats, listing).",
         )
 
@@ -46,24 +46,190 @@ class Action:
             models = data.get("data", [])
             if not models:
                 return "No models found."
-
             lines = []
             for m in models:
                 size = m.get("size", "?")
                 m_id = m.get("id", "Unknown")
                 downloaded = "[DL]" if m.get("downloaded") else ""
                 lines.append(f"• {m_id} ({size}GB) {downloaded}")
-
             limit = 30
-            return "\n".join(lines[:limit]) + (
-                "\n... (and more)" if len(lines) > limit else ""
-            )
+            return "\n".join(lines[:limit]) + ("\n... (and more)" if len(lines) > limit else "")
         except Exception:
             return "Could not parse model list."
+
+    def _generate_gauge_html(self, label: str, value: float, max_val: float, unit: str) -> str:
+        percent = min(100, max(0, (value / max_val) * 100)) if max_val > 0 else 0
+        color = "#ef4444"
+        if percent > 30: color = "#eab308"
+        if percent > 70: color = "#22c55e"
+        
+        return f"""
+        <div style="margin-bottom: 8px;">
+            <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#94a3b8; margin-bottom:2px;">
+                <span>{label}</span>
+                <span style="color:#f1f5f9; font-weight:600; font-family:monospace;">{value} {unit}</span>
+            </div>
+            <div style="width:100%; background:#334155; height:6px; border-radius:3px; overflow:hidden;">
+                <div style="width:{percent}%; background:{color}; height:100%;"></div>
+            </div>
+        </div>
+        """
+
+    def _make_raw_card(self, title: str, data: Any) -> str:
+        try:
+            content = json.dumps(data, indent=2)
+        except:
+            content = str(data)
+        return f"""
+        <div class="raw-card">
+            <div class="raw-header"><span class="raw-title">{title}</span></div>
+            <pre>{content}</pre>
+        </div>
+        """
+
+    def _build_result_html(self, title: str, badge: str, content: str, is_error: bool = False) -> str:
+        """Simple wrapper for command results (Pull/Delete response)."""
+        color = "#ef4444" if is_error else "#22c55e"
+        return f"""
+        <style>
+            .res-panel {{ background: #0f172a; border: 1px solid #1f2937; border-radius: 8px; padding: 12px; font-family: sans-serif; color: #e2e8f0; }}
+            .res-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1f2937; padding-bottom: 8px; margin-bottom: 8px; }}
+            .res-badge {{ font-size: 0.7rem; background: {color}20; color: {color}; padding: 2px 8px; border-radius: 99px; border: 1px solid {color}40; }}
+            .res-pre {{ background: #1e293b50; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 0.75rem; color: #cbd5e1; white-space: pre-wrap; }}
+        </style>
+        <div class="res-panel">
+            <div class="res-header">
+                <span style="font-weight:600;">🍋 {title}</span>
+                <span class="res-badge">{badge}</span>
+            </div>
+            <div class="res-pre">{content}</div>
+        </div>
+        """
+
+    def _build_dashboard_html(self, health: dict, stats: dict, system: dict, models: dict) -> str:
+        """The main Dashboard generator."""
+        unique_id = f"lemon_{id(health)}"
+        
+        cpu_name = system.get("Processor", "Unknown CPU")
+        ram = system.get("Physical Memory", "Unknown RAM")
+        os_ver = system.get("OS Version", "Unknown OS")
+        devices = system.get("devices", {})
+        
+        badges = []
+        if devices.get("npu", {}).get("available"): badges.append('<span class="badge badge-npu">NPU DETECTED</span>')
+        gpu_list = devices.get("amd_dgpu", []) + devices.get("nvidia_dgpu", [])
+        if gpu_list or devices.get("amd_igpu", {}).get("available"): badges.append('<span class="badge badge-gpu">GPU ACTIVE</span>')
+        badges_html = " ".join(badges) if badges else '<span class="badge" style="opacity:0.5">CPU ONLY</span>'
+
+        tps = stats.get("tokens_per_second", 0)
+        ttft = stats.get("time_to_first_token", 0)
+        prompt_tokens = stats.get("prompt_tokens", 0)
+        input_tokens = stats.get("input_tokens", 0)
+        output_tokens = stats.get("output_tokens", 0)
+        decode_times = stats.get("decode_token_times", [])
+        avg_decode = (sum(decode_times) / len(decode_times)) if decode_times else 0
+        
+        tps_fmt = f"{tps:.3f}"
+        ttft_fmt = f"{ttft:.4f}"
+        avg_decode_fmt = f"{avg_decode:.4f}"
+
+        loaded_models = health.get("all_models_loaded", [])
+        active_models_html = ""
+        if not loaded_models:
+            active_models_html = '<div style="text-align:center; padding:15px; color:#64748b; border:1px dashed #334155; border-radius:6px; font-size:0.75rem;"><i>No models loaded via API yet.</i></div>'
+        else:
+            for m in loaded_models:
+                active_models_html += f"""
+                <div class="model-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-weight:600; color:#f59e0b; font-size:0.8rem;">{m.get("model_name", "Unknown")}</span>
+                        <span style="font-size:0.6rem; background:#334155; padding:1px 5px; border-radius:4px;">{m.get("type", "llm").upper()}</span>
+                    </div>
+                    <div style="font-size:0.7rem; color:#94a3b8; margin-top:4px; display:grid; grid-template-columns: 1fr 1fr; gap:4px;">
+                        <div>Dev: <span style="color:#e2e8f0;">{m.get("device", "cpu").replace(" ", "+").upper()}</span></div>
+                        <div>Rec: {m.get("recipe", "unknown")}</div>
+                    </div>
+                </div>
+                """
+
+        raw_content = ""
+        raw_content += self._make_raw_card("Health Status", health)
+        raw_content += self._make_raw_card("Inference Stats", stats)
+        raw_content += self._make_raw_card("System Info", system)
+        raw_content += self._make_raw_card("Model Inventory", models)
+
+        return f"""
+        <style>
+            :root {{ --bg-card: #0f172a; --border: #1e293b; --text: #e2e8f0; --accent: #f59e0b; --text-muted: #64748b; }}
+            #{unique_id} .dash-container {{ font-family: -apple-system, sans-serif; color: var(--text); background: #020617; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 14px; }}
+            #{unique_id} .dash-header {{ background: var(--bg-card); padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }}
+            #{unique_id} .grid {{ display: grid; grid-template-columns: 1fr; gap: 1px; background: var(--border); }}
+            @media (min-width: 600px) {{ #{unique_id} .grid {{ grid-template-columns: 1fr 1fr; }} }}
+            #{unique_id} .panel {{ background: #0f172a; padding: 16px; display: flex; flex-direction: column; gap: 12px; }}
+            #{unique_id} .stat-big {{ font-size: 1.4rem; font-weight: 700; color: #f8fafc; font-family: monospace; }}
+            #{unique_id} .stat-label {{ font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }}
+            #{unique_id} .stat-sub {{ font-size: 0.7rem; color: #94a3b8; }}
+            #{unique_id} .badge {{ font-size: 0.65rem; padding: 2px 8px; border-radius: 12px; font-weight: 600; border: 1px solid transparent; }}
+            #{unique_id} .badge-npu {{ background: #7c3aed20; color: #a78bfa; border-color: #7c3aed40; }}
+            #{unique_id} .badge-gpu {{ background: #05966920; color: #34d399; border-color: #05966940; }}
+            #{unique_id} .model-card {{ background: #1e293b50; border: 1px solid #334155; border-left: 3px solid var(--accent); border-radius: 4px; padding: 8px; margin-bottom: 8px; }}
+            #{unique_id} .toggle-btn {{ background: #1e293b; border: 1px solid #334155; color: #cbd5e1; font-size: 0.7rem; padding: 4px 10px; border-radius: 4px; cursor: pointer; }}
+            #{unique_id} .toggle-btn:hover {{ background: #334155; color: white; }}
+            #{unique_id} .raw-card {{ background: #1e293b50; border: 1px solid #334155; border-radius: 6px; margin-bottom: 10px; overflow: hidden; }}
+            #{unique_id} .raw-header {{ background: #1e293b; padding: 6px 10px; border-bottom: 1px solid #334155; }}
+            #{unique_id} .raw-title {{ font-size: 0.75rem; color: #94a3b8; font-weight: bold; text-transform: uppercase; }}
+            #{unique_id} pre {{ margin: 0; padding: 10px; background: #0b1120; color: #cbd5e1; font-size: 0.7rem; overflow: auto; max-height: 200px; white-space: pre-wrap; word-wrap: break-word; }}
+            #{unique_id} .stat-row {{ display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }}
+        </style>
+        <div id="{unique_id}">
+            <div class="dash-container">
+                <div class="dash-header">
+                    <div style="display:flex; flex-direction:column;">
+                        <span style="font-weight:700; font-size:0.9rem;">🍋 Lemonade Panel</span>
+                        <span style="font-size:0.65rem; color:#64748b;">{os_ver}</span>
+                    </div>
+                    <button class="toggle-btn" onclick="var v=document.getElementById('visual-{unique_id}');var r=document.getElementById('raw-{unique_id}');if(v.style.display==='none'){{v.style.display='grid';r.style.display='none';this.innerText='Show Raw Data';}}else{{v.style.display='none';r.style.display='block';this.innerText='Show Visuals';}}">Show Raw Data</button>
+                </div>
+                <div id="visual-{unique_id}" class="grid">
+                    <div class="panel">
+                        <div>
+                            {self._generate_gauge_html("Throughput", tps, 60, "T/s")}
+                            <div class="stat-sub">Speed: {tps_fmt} tokens/sec</div>
+                        </div>
+                        <div class="stat-row">
+                            <div><div class="stat-label">Initial Latency</div><div class="stat-big">{ttft_fmt}<span style="font-size:0.9rem; color:#64748b">s</span></div></div>
+                            <div style="text-align:right;"><div class="stat-label">Avg Decode</div><div class="stat-big">{avg_decode_fmt}<span style="font-size:0.9rem; color:#64748b">s</span></div></div>
+                        </div>
+                        <div>
+                            <div class="stat-label" style="margin-bottom:4px;">Token Usage</div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+                                <div style="background:#1e293b; padding:6px; border-radius:4px; text-align:center;"><div class="stat-label">Input</div><div style="color:#e2e8f0; font-weight:600;">{input_tokens}</div></div>
+                                <div style="background:#1e293b; padding:6px; border-radius:4px; text-align:center;"><div class="stat-label">Output</div><div style="color:#e2e8f0; font-weight:600;">{output_tokens}</div></div>
+                            </div>
+                        </div>
+                        <div style="margin-top:auto;">
+                            <div class="stat-label">System</div>
+                            <div style="font-size:0.75rem; color:#e2e8f0;">{cpu_name}</div>
+                            <div style="display:flex; gap:8px; margin-top:4px;">{badges_html}</div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <div class="stat-label">Active Memory Slots</div>
+                            <div class="stat-sub">{ram}</div>
+                        </div>
+                        {active_models_html}
+                    </div>
+                </div>
+                <div id="raw-{unique_id}" style="display:none; padding: 12px;">{raw_content}</div>
+            </div>
+        </div>
+        """
 
     async def action(
         self,
         body: dict,
+        __user__: dict,
         __event_emitter__: Callable[[dict], Awaitable[None]] = None,
         __event_call__: Callable[[dict], Awaitable[dict]] = None,
         **kwargs,
@@ -79,283 +245,103 @@ class Action:
 
         if __event_call__:
             try:
-                user_input = await __event_call__(
-                    {
-                        "type": "input",
-                        "data": {
-                            "title": "Lemonade Control",
-                            "message": "Enter command (pull, delete, health, stats) or leave EMPTY for Overview:",
-                            "placeholder": "Leave empty for full system report",
-                        },
+                user_input = await __event_call__({
+                    "type": "input",
+                    "data": {
+                        "title": "Lemonade Control",
+                        "message": "Enter command (pull, delete, health) or leave EMPTY for Dashboard:",
+                        "placeholder": "Leave empty for Dashboard"
                     }
-                )
+                })
                 if isinstance(user_input, str):
                     endpoint_key = user_input.strip().lower()
             except Exception as e:
-                await self._emit_notification(
-                    __event_emitter__, f"Input error: {e}", "error"
-                )
-                return body
+                pass
 
-        if not endpoint_key:
-            await self._emit_status(
-                __event_emitter__, "Fetching System Overview...", False
-            )
+        async with httpx.AsyncClient(headers={"Connection": "close"}, timeout=self.valves.TIMEOUT_SECONDS) as client:
+            
+            if endpoint_key in ["pull", "delete"]:
+                target_url = f"{base_v1}/{endpoint_key}"
+                payload = {}
+                
+                await self._emit_status(__event_emitter__, f"Fetching info for {endpoint_key}...", False)
+                
+                try:
+                    list_url = f"{base_v1}/models" + ("?show_all=true" if endpoint_key == "pull" else "")
+                    list_resp = await client.get(list_url)
+                    model_list_str = self._format_model_list(list_resp.json()) if list_resp.status_code == 200 else "Error fetching list."
+                except:
+                    model_list_str = "Could not fetch model list."
 
-            async with httpx.AsyncClient(timeout=self.valves.TIMEOUT_SECONDS) as client:
+                if __event_call__:
+                    model_name = await __event_call__({
+                        "type": "input",
+                        "data": {
+                            "title": f"{endpoint_key.title()} Model",
+                            "message": f"Models Available:\n\n{model_list_str}\n\nEnter ID to {endpoint_key}:",
+                            "placeholder": "Qwen3-14B-GGUF"
+                        }
+                    })
+                    if model_name:
+                        payload = {"model_name": model_name.strip()}
+                    else:
+                        return body # Cancelled
+
+                # Execute with LONG Timeout
+                timeout = 1800 if endpoint_key == "pull" else 180
+                await self._emit_status(__event_emitter__, f"Executing {endpoint_key} (Timeout: {timeout}s)...", False)
+                await self._emit_notification(__event_emitter__, f"Executing {endpoint_key} (Timeout: {timeout}s)...", False)
+                
+                try:
+                    resp = await client.post(target_url, json=payload, timeout=timeout)
+                    try:
+                        resp_json = json.dumps(resp.json(), indent=2)
+                    except:
+                        resp_json = resp.text
+                    
+                    html_out = self._build_result_html(
+                        f"{endpoint_key.title()} Result", 
+                        str(resp.status_code), 
+                        resp_json, 
+                        is_error=(resp.status_code >= 400)
+                    )
+                except Exception as e:
+                    html_out = self._build_result_html("Error", "Fail", str(e), is_error=True)
+
+                if body.get("messages") and isinstance(body["messages"], list):
+                    body["messages"][-1]["content"] += f"\n\n{f'```html{html_out}```'}"
+
+            else:
+                await self._emit_status(__event_emitter__, "Fetching Telemetry...", False)
+                
                 results = await asyncio.gather(
                     client.get(f"{base_v1}/health"),
                     client.get(f"{base_v1}/stats"),
                     client.get(f"{base_v1}/system-info"),
-                    client.get(f"{base_url}/live"),
                     client.get(f"{base_v1}/models"),
-                    return_exceptions=True,
+                    return_exceptions=True
                 )
-
-                labels = ["Health", "Stats", "System", "Live", "Models"]
-                overview_html_parts = []
-
-                for i, res in enumerate(results):
-                    label = labels[i]
-                    content = ""
-                    status_class = "ok"
-
+                
+                data = []
+                for res in results:
                     if isinstance(res, Exception):
-                        content = f"Error: {str(res)}"
-                        status_class = "error"
-                    elif res.status_code >= 400:
-                        content = f"Error {res.status_code}: {res.text}"
-                        status_class = "error"
-                    else:
+                        data.append({"error": str(res)})
+                    elif hasattr(res, 'status_code') and res.status_code != 200:
+                        data.append({"error": f"HTTP {res.status_code}", "text": res.text})
+                    elif hasattr(res, 'json'):
                         try:
-                            json_obj = res.json()
-                            content = json.dumps(json_obj, indent=2)
+                            data.append(res.json())
                         except:
-                            content = res.text
-
-                    overview_html_parts.append(
-                        f"""
-                        <div class="card">
-                            <div class="card-header">
-                                <span class="card-title">{label}</span>
-                                <span class="indicator {status_class}"></span>
-                            </div>
-                            <pre>{content}</pre>
-                        </div>
-                    """
-                    )
-
-            html_block = self._build_html_wrapper(
-                title="System Overview",
-                badge="Report",
-                content="".join(overview_html_parts),
-                is_grid=True,
-            )
-
-            await self._append_to_chat(body, html_block)
-            await self._emit_status(__event_emitter__, "Overview Ready", True)
-            return body
-
-        payload: Optional[dict] = None
-        target_url = ""
-        method = "GET"
-
-        # Determine specific timeout for the final execution
-        execution_timeout = self.valves.TIMEOUT_SECONDS
-
-        if endpoint_key == "pull":
-            execution_timeout = 1800  # 30 minutes for large file downloads
-        elif endpoint_key == "delete":
-            execution_timeout = 180  # 3 minutes for deletion operations
-
-        async with httpx.AsyncClient(timeout=self.valves.TIMEOUT_SECONDS) as client:
-
-            if endpoint_key == "pull":
-                await self._emit_status(
-                    __event_emitter__, "Fetching available models...", False
-                )
-                try:
-                    list_resp = await client.get(f"{base_v1}/models?show_all=true")
-                    if list_resp.status_code == 200:
-                        model_list_str = self._format_model_list(list_resp.json())
+                            data.append({})
                     else:
-                        model_list_str = f"Error fetching list: {list_resp.status_code}"
-
-                    if __event_call__:
-                        model_name = await __event_call__(
-                            {
-                                "type": "input",
-                                "data": {
-                                    "title": "Pull Model",
-                                    "message": f"Available Models to Download:\n\n{model_list_str}\n\nEnter ID to pull:",
-                                    "placeholder": "Qwen3-14B-GGUF",
-                                },
-                            }
-                        )
-                        if model_name:
-                            payload = {"model_name": model_name.strip()}
-                            target_url = f"{base_v1}/pull"
-                            method = "POST"
-                        else:
-                            return body
-                except Exception as e:
-                    await self._emit_notification(
-                        __event_emitter__, f"Failed to list models: {e}", "error"
-                    )
-                    return body
-
-            elif endpoint_key == "delete":
-                await self._emit_status(
-                    __event_emitter__, "Fetching installed models...", False
-                )
-                try:
-                    list_resp = await client.get(f"{base_v1}/models")
-                    if list_resp.status_code == 200:
-                        model_list_str = self._format_model_list(list_resp.json())
-                    else:
-                        model_list_str = f"Error fetching list: {list_resp.status_code}"
-
-                    if __event_call__:
-                        model_name = await __event_call__(
-                            {
-                                "type": "input",
-                                "data": {
-                                    "title": "Delete Model",
-                                    "message": f"Installed Models:\n\n{model_list_str}\n\nEnter ID to delete:",
-                                    "placeholder": "Qwen3-14B-GGUF",
-                                },
-                            }
-                        )
-                        if model_name:
-                            payload = {"model_name": model_name.strip()}
-                            target_url = f"{base_v1}/delete"
-                            method = "POST"
-                        else:
-                            return body
-                except Exception as e:
-                    await self._emit_notification(
-                        __event_emitter__, f"Failed to list models: {e}", "error"
-                    )
-                    return body
-
-            else:
-                route_map = {
-                    "models": f"{base_v1}/models",
-                    "health": f"{base_v1}/health",
-                    "stats": f"{base_v1}/stats",
-                    "system": f"{base_v1}/system-info",
-                    "live": f"{base_url}/live",
-                }
-                target_url = route_map.get(endpoint_key, f"{base_v1}/{endpoint_key}")
-
-            await self._emit_status(
-                __event_emitter__, f"Executing {endpoint_key}...", False
-            )
-            await self._emit_notification(
-                __event_emitter__, f"Executing {endpoint_key}...", False
-            )
-
-            try:
-                if method == "GET":
-                    resp = await client.get(target_url, timeout=execution_timeout)
-                else:
-                    resp = await client.post(
-                        target_url, json=payload, timeout=execution_timeout
-                    )
-
-                status_line = f"Status: {resp.status_code}"
-                try:
-                    response_text = json.dumps(resp.json(), indent=2)
-                except:
-                    response_text = resp.text
-
-                html_block = self._build_html_wrapper(
-                    title="Lemonade Panel",
-                    badge=endpoint_key,
-                    content=f"""
-                        <div class="card">
-                            <div class="card-header"><span class="card-title">Response</span></div>
-                            <pre>{response_text}</pre>
-                        </div>
-                    """,
-                )
-
-                await self._append_to_chat(body, html_block)
-                await self._emit_notification(
-                    __event_emitter__,
-                    f"Request completed ({resp.status_code})",
-                    "success" if resp.status_code < 400 else "warning",
-                )
-
-            except Exception as e:
-                err_html = self._build_html_wrapper(
-                    title="Error",
-                    badge="Fail",
-                    content=f"<div class='card'><pre style='color:#ef4444'>{str(e)}</pre></div>",
-                )
-                await self._append_to_chat(body, err_html)
-                await self._emit_notification(
-                    __event_emitter__, "Connection Failed", "error"
-                )
+                        data.append({})
+                
+                health_d, stats_d, system_d, models_d = data
+                
+                html_dash = self._build_dashboard_html(health_d, stats_d, system_d, models_d)
+                
+                if body.get("messages") and isinstance(body["messages"], list):
+                    body["messages"][-1]["content"] += f"\n\n```html\n{html_dash}\n```"
 
         await self._emit_status(__event_emitter__, "Done", True)
         return body
-
-    def _build_html_wrapper(self, title, badge, content, is_grid=False):
-        """Generates the CSS/HTML for the plugin output."""
-        layout_css = (
-            """
-            .layout { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; }
-        """
-            if is_grid
-            else """
-            .layout { display: flex; flex-direction: column; gap: 10px; }
-        """
-        )
-
-        return f"""```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: sans-serif; background: transparent; margin: 0; color: #e2e8f0; }}
-        .panel {{ background: #0f172a; border: 1px solid #1f2937; border-radius: 8px; padding: 12px; }}
-        .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #1f2937; padding-bottom: 8px; }}
-        .title {{ font-weight: 600; }}
-        .badge {{ font-size: 0.75rem; background: #1e293b; padding: 2px 8px; border-radius: 99px; color: #94a3b8; text-transform: uppercase; }}
-        
-        {layout_css}
-        
-        .card {{ background: #1e293b50; border: 1px solid #334155; border-radius: 6px; overflow: hidden; }}
-        .card-header {{ background: #1e293b; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; }}
-        .card-title {{ font-size: 0.75rem; color: #94a3b8; font-weight: bold; text-transform: uppercase; }}
-        .indicator {{ width: 8px; height: 8px; border-radius: 50%; background: #64748b; }}
-        .indicator.ok {{ background: #22c55e; box-shadow: 0 0 5px #22c55e40; }}
-        .indicator.error {{ background: #ef4444; }}
-        
-        pre {{ margin: 0; padding: 10px; font-family: monospace; font-size: 0.7rem; white-space: pre-wrap; word-wrap: break-word; color: #cbd5e1; max-height: 300px; overflow-y: auto; }}
-        
-        /* Custom scrollbar for pre */
-        pre::-webkit-scrollbar {{ width: 6px; height: 6px; }}
-        pre::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
-        pre::-webkit-scrollbar-track {{ background: #0f172a; }}
-    </style>
-</head>
-<body>
-    <div class="panel">
-        <div class="header">
-            <span class="title">🍋 {title}</span>
-            <span class="badge">{badge}</span>
-        </div>
-        <div class="layout">
-            {content}
-        </div>
-    </div>
-</body>
-</html>
-```"""
-
-    async def _append_to_chat(self, body, content):
-        if body.get("messages") and isinstance(body["messages"], list):
-            body["messages"][-1]["content"] += f"\n\n{content}"
