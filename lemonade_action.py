@@ -1,13 +1,14 @@
 """
 title: Lemonade Control Panel
 author: Sawan Srivastava
-version: 0.8
+version: 0.9
 description: Open WebUI Plugin for Querying Lemonade Server Endpoints
 
 """
 
 import json
 import asyncio
+from urllib.parse import urlparse, urlunparse
 from typing import Optional, Callable, Awaitable, List, Dict, Any
 
 import httpx
@@ -27,6 +28,66 @@ class Action:
 
     def __init__(self):
         self.valves = self.Valves()
+
+    def _build_base_candidates(self, base_url: str) -> List[str]:
+        """Return URL candidates, preferring configured BASE_URL and then docker internal fallback."""
+        primary = base_url.rstrip("/")
+        parsed = urlparse(primary)
+        host = (parsed.hostname or "").lower()
+
+        if "localhost" not in host:
+            return [primary]
+
+        fallback_host = host.replace("localhost", "host.docker.internal")
+        netloc = f"{fallback_host}:{parsed.port}" if parsed.port else fallback_host
+        fallback = urlunparse(
+            (
+                parsed.scheme,
+                netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        ).rstrip("/")
+
+        return [primary] if fallback == primary else [primary, fallback]
+
+    async def _request_with_fallback(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        base_candidates: List[str],
+        endpoint_path: str,
+        *,
+        timeout: Optional[int] = None,
+        **kwargs,
+    ):
+        """Try primary URL first; if it fails, retry against docker internal fallback."""
+        last_exception = None
+        last_index = len(base_candidates) - 1
+
+        for idx, base in enumerate(base_candidates):
+            try:
+                response = await client.request(
+                    method,
+                    f"{base}/api/v1{endpoint_path}",
+                    timeout=timeout,
+                    **kwargs,
+                )
+
+                # If primary returns API error, retry fallback candidate once.
+                if response.status_code >= 400 and idx < last_index:
+                    continue
+                return response
+            except Exception as e:
+                last_exception = e
+                if idx == last_index:
+                    raise
+
+        if last_exception is not None:
+            raise last_exception
+        raise RuntimeError("Request failed without response")
 
     async def _emit_status(self, emitter, description: str, done: bool = False):
         if emitter:
@@ -252,8 +313,7 @@ class Action:
         __event_call__: Callable[[dict], Awaitable[dict]] = None,
         **kwargs,
     ):
-        base_url = self.valves.BASE_URL.rstrip("/")
-        base_v1 = f"{base_url}/api/v1"
+        base_candidates = self._build_base_candidates(self.valves.BASE_URL)
         endpoint_key = ""
 
         if __user__["role"] != "admin":
@@ -286,7 +346,6 @@ class Action:
         ) as client:
 
             if endpoint_key in ["pull", "delete"]:
-                target_url = f"{base_v1}/{endpoint_key}"
                 payload = {}
 
                 await self._emit_status(
@@ -294,10 +353,15 @@ class Action:
                 )
 
                 try:
-                    list_url = f"{base_v1}/models" + (
+                    list_path = "/models" + (
                         "?show_all=true" if endpoint_key == "pull" else ""
                     )
-                    list_resp = await client.get(list_url)
+                    list_resp = await self._request_with_fallback(
+                        client,
+                        "GET",
+                        base_candidates,
+                        list_path,
+                    )
                     model_list_str = (
                         self._format_model_list(list_resp.json())
                         if list_resp.status_code == 200
@@ -331,7 +395,14 @@ class Action:
                 )
 
                 try:
-                    resp = await client.post(target_url, json=payload, timeout=timeout)
+                    resp = await self._request_with_fallback(
+                        client,
+                        "POST",
+                        base_candidates,
+                        f"/{endpoint_key}",
+                        json=payload,
+                        timeout=timeout,
+                    )
                     try:
                         resp_json = json.dumps(resp.json(), indent=2)
                     except:
@@ -357,10 +428,18 @@ class Action:
                 )
 
                 results = await asyncio.gather(
-                    client.get(f"{base_v1}/health"),
-                    client.get(f"{base_v1}/stats"),
-                    client.get(f"{base_v1}/system-info"),
-                    client.get(f"{base_v1}/models"),
+                    self._request_with_fallback(
+                        client, "GET", base_candidates, "/health"
+                    ),
+                    self._request_with_fallback(
+                        client, "GET", base_candidates, "/stats"
+                    ),
+                    self._request_with_fallback(
+                        client, "GET", base_candidates, "/system-info"
+                    ),
+                    self._request_with_fallback(
+                        client, "GET", base_candidates, "/models"
+                    ),
                     return_exceptions=True,
                 )
 
