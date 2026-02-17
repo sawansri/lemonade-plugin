@@ -177,10 +177,10 @@ class Action:
         </div>
         """
 
-    def _build_dashboard_html(
+    def _build_snapshot_html(
         self, health: dict, stats: dict, system: dict, models: dict
     ) -> str:
-        """The main Dashboard generator."""
+        """The main snapshot generator."""
         unique_id = f"lemon_{id(health)}"
         
         cpu_name = system.get("Processor", "Unknown CPU")
@@ -332,8 +332,8 @@ class Action:
                     "type": "input",
                     "data": {
                         "title": "Lemonade Control",
-                        "message": "Enter command (pull, delete, health) or leave EMPTY for Dashboard:",
-                        "placeholder": "Leave empty for Dashboard"
+                        "message": "Enter command (pull, delete, health) or leave EMPTY for snapshot view:",
+                        "placeholder": "Leave empty for snapshot view"
                     }
                 })
                 if isinstance(user_input, str):
@@ -461,7 +461,7 @@ class Action:
 
                 health_d, stats_d, system_d, models_d = data
 
-                html_dash = self._build_dashboard_html(
+                html_dash = self._build_snapshot_html(
                     health_d, stats_d, system_d, models_d
                 )
 
