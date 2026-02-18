@@ -1,7 +1,7 @@
 """
 title: Lemonade Control Panel
 author: Sawan Srivastava
-version: 0.9
+version: 1.0
 description: Open WebUI Plugin for Querying Lemonade Server Endpoints
 
 """
