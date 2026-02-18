@@ -21,6 +21,10 @@ class Action:
             default="http://localhost:8000",
             description="Lemonade server base URL (without /api/v1).",
         )
+        LEMONADE_API_KEY: str = Field(
+            default="",
+            description="Optional API key sent as HTTP Bearer auth for Lemonade requests.",
+        )
         TIMEOUT_SECONDS: int = Field(
             default=5,
             description="Default timeout for standard API requests (health, stats, listing).",
@@ -341,8 +345,13 @@ class Action:
             except Exception as e:
                 pass
 
+        headers = {"Connection": "close"}
+        api_key = self.valves.LEMONADE_API_KEY.strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         async with httpx.AsyncClient(
-            headers={"Connection": "close"}, timeout=self.valves.TIMEOUT_SECONDS
+            headers=headers, timeout=self.valves.TIMEOUT_SECONDS
         ) as client:
 
             if endpoint_key in ["pull", "delete"]:
