@@ -1,14 +1,13 @@
 """
 title: Lemonade Control Panel
 author: Sawan Srivastava
-version: 1.0
+version: 1.1
 description: Open WebUI Plugin for Querying Lemonade Server Endpoints
 
 """
 
 import json
 import asyncio
-from urllib.parse import urlparse, urlunparse
 from typing import Optional, Callable, Awaitable, List, Dict, Any
 
 import httpx
@@ -32,66 +31,6 @@ class Action:
 
     def __init__(self):
         self.valves = self.Valves()
-
-    def _build_base_candidates(self, base_url: str) -> List[str]:
-        """Return URL candidates, preferring configured BASE_URL and then docker internal fallback."""
-        primary = base_url.rstrip("/")
-        parsed = urlparse(primary)
-        host = (parsed.hostname or "").lower()
-
-        if "localhost" not in host:
-            return [primary]
-
-        fallback_host = host.replace("localhost", "host.docker.internal")
-        netloc = f"{fallback_host}:{parsed.port}" if parsed.port else fallback_host
-        fallback = urlunparse(
-            (
-                parsed.scheme,
-                netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment,
-            )
-        ).rstrip("/")
-
-        return [primary] if fallback == primary else [primary, fallback]
-
-    async def _request_with_fallback(
-        self,
-        client: httpx.AsyncClient,
-        method: str,
-        base_candidates: List[str],
-        endpoint_path: str,
-        *,
-        timeout: Optional[int] = None,
-        **kwargs,
-    ):
-        """Try primary URL first; if it fails, retry against docker internal fallback."""
-        last_exception = None
-        last_index = len(base_candidates) - 1
-
-        for idx, base in enumerate(base_candidates):
-            try:
-                response = await client.request(
-                    method,
-                    f"{base}/api/v1{endpoint_path}",
-                    timeout=timeout,
-                    **kwargs,
-                )
-
-                # If primary returns API error, retry fallback candidate once.
-                if response.status_code >= 400 and idx < last_index:
-                    continue
-                return response
-            except Exception as e:
-                last_exception = e
-                if idx == last_index:
-                    raise
-
-        if last_exception is not None:
-            raise last_exception
-        raise RuntimeError("Request failed without response")
 
     async def _emit_status(self, emitter, description: str, done: bool = False):
         if emitter:
@@ -118,24 +57,17 @@ class Action:
                 downloaded = "[Downloaded]" if m.get("downloaded") else ""
                 lines.append(f"• {m_id} ({size}GB) {downloaded}")
             limit = 30
-            return "\n".join(lines[:limit]) + (
-                "\n... (and more)" if len(lines) > limit else ""
-            )
+            return "\n".join(lines[:limit]) + ("\n... (and more)" if len(lines) > limit else "")
         except Exception:
             return "Could not parse model list."
 
-    # --- Visualization Generators ---
 
-    def _generate_gauge_html(
-        self, label: str, value: float, max_val: float, unit: str
-    ) -> str:
+    def _generate_gauge_html(self, label: str, value: float, max_val: float, unit: str) -> str:
         percent = min(100, max(0, (value / max_val) * 100)) if max_val > 0 else 0
         color = "#ef4444"
-        if percent > 30:
-            color = "#eab308"
-        if percent > 70:
-            color = "#22c55e"
-
+        if percent > 30: color = "#eab308"
+        if percent > 70: color = "#22c55e"
+        
         return f"""
         <div style="margin-bottom: 8px;">
             <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#94a3b8; margin-bottom:2px;">
@@ -160,10 +92,8 @@ class Action:
         </div>
         """
 
-    def _build_result_html(
-        self, title: str, badge: str, content: str, is_error: bool = False
-    ) -> str:
-        """Simple wrapper for command results (Pull/Delete response)."""
+    def _build_result_html(self, title: str, badge: str, content: str, is_error: bool = False) -> str:
+        """Simple wrapper for command results or single endpoint dumps."""
         color = "#ef4444" if is_error else "#22c55e"
         return f"""
         <style>
@@ -193,16 +123,10 @@ class Action:
         devices = system.get("devices", {})
         
         badges = []
-        if devices.get("npu", {}).get("available"):
-            badges.append('<span class="badge badge-npu">NPU DETECTED</span>')
+        if devices.get("npu", {}).get("available"): badges.append('<span class="badge badge-npu">NPU DETECTED</span>')
         gpu_list = devices.get("amd_dgpu", []) + devices.get("nvidia_dgpu", [])
-        if gpu_list or devices.get("amd_igpu", {}).get("available"):
-            badges.append('<span class="badge badge-gpu">GPU ACTIVE</span>')
-        badges_html = (
-            " ".join(badges)
-            if badges
-            else '<span class="badge" style="opacity:0.5">CPU ONLY</span>'
-        )
+        if gpu_list or devices.get("amd_igpu", {}).get("available"): badges.append('<span class="badge badge-gpu">GPU ACTIVE</span>')
+        badges_html = " ".join(badges) if badges else '<span class="badge" style="opacity:0.5">CPU ONLY</span>'
 
         tps = stats.get("tokens_per_second", 0)
         ttft = stats.get("time_to_first_token", 0)
@@ -211,7 +135,7 @@ class Action:
         output_tokens = stats.get("output_tokens", 0)
         decode_times = stats.get("decode_token_times", [])
         avg_decode = (sum(decode_times) / len(decode_times)) if decode_times else 0
-
+        
         tps_fmt = f"{tps:.3f}"
         ttft_fmt = f"{ttft:.4f}"
         avg_decode_fmt = f"{avg_decode:.4f}"
@@ -317,7 +241,8 @@ class Action:
         __event_call__: Callable[[dict], Awaitable[dict]] = None,
         **kwargs,
     ):
-        base_candidates = self._build_base_candidates(self.valves.BASE_URL)
+        base_url = self.valves.BASE_URL.rstrip("/")
+        base_v1 = f"{base_url}/api/v1"
         endpoint_key = ""
 
         if __user__["role"] != "admin":
@@ -355,119 +280,97 @@ class Action:
         ) as client:
 
             if endpoint_key in ["pull", "delete"]:
+                target_url = f"{base_v1}/{endpoint_key}"
                 payload = {}
-
-                await self._emit_status(
-                    __event_emitter__, f"Fetching info for {endpoint_key}...", False
-                )
-
+                
+                await self._emit_status(__event_emitter__, f"Fetching info for {endpoint_key}...", False)
                 try:
-                    list_path = "/models" + (
-                        "?show_all=true" if endpoint_key == "pull" else ""
-                    )
-                    list_resp = await self._request_with_fallback(
-                        client,
-                        "GET",
-                        base_candidates,
-                        list_path,
-                    )
-                    model_list_str = (
-                        self._format_model_list(list_resp.json())
-                        if list_resp.status_code == 200
-                        else "Error fetching list."
-                    )
+                    list_url = f"{base_v1}/models" + ("?show_all=true" if endpoint_key == "pull" else "")
+                    list_resp = await client.get(list_url)
+                    model_list_str = self._format_model_list(list_resp.json()) if list_resp.status_code == 200 else "Error fetching list."
                 except:
                     model_list_str = "Could not fetch model list."
 
                 if __event_call__:
-                    model_name = await __event_call__(
-                        {
-                            "type": "input",
-                            "data": {
-                                "title": f"{endpoint_key.title()} Model",
-                                "message": f"Models Available:\n\n{model_list_str}\n\nEnter ID to {endpoint_key}:",
-                                "placeholder": "Qwen3-14B-GGUF",
-                            },
+                    model_name = await __event_call__({
+                        "type": "input",
+                        "data": {
+                            "title": f"{endpoint_key.title()} Model",
+                            "message": f"Models Available:\n\n{model_list_str}\n\nEnter ID to {endpoint_key}:",
+                            "placeholder": "Qwen3-14B-GGUF"
                         }
-                    )
+                    })
                     if model_name:
                         payload = {"model_name": model_name.strip()}
                     else:
-                        return body  # Cancelled
+                        return body 
 
-                # Execute with LONG Timeout
+                # Extended timeout for operations
                 timeout = 1800 if endpoint_key == "pull" else 180
-                await self._emit_status(
-                    __event_emitter__,
-                    f"Executing {endpoint_key} (Timeout: {timeout}s)...",
-                    False,
-                )
-
+                await self._emit_status(__event_emitter__, f"Executing {endpoint_key}...", False)
+                
                 try:
-                    resp = await self._request_with_fallback(
-                        client,
-                        "POST",
-                        base_candidates,
-                        f"/{endpoint_key}",
-                        json=payload,
-                        timeout=timeout,
-                    )
+                    resp = await client.post(target_url, json=payload, timeout=timeout)
                     try:
                         resp_json = json.dumps(resp.json(), indent=2)
                     except:
                         resp_json = resp.text
-
-                    html_out = self._build_result_html(
-                        f"{endpoint_key.title()} Result",
-                        str(resp.status_code),
-                        resp_json,
-                        is_error=(resp.status_code >= 400),
-                    )
+                    
+                    html_out = self._build_result_html(f"{endpoint_key.title()} Result", str(resp.status_code), resp_json, is_error=(resp.status_code >= 400))
                 except Exception as e:
-                    html_out = self._build_result_html(
-                        "Error", "Fail", str(e), is_error=True
-                    )
+                    html_out = self._build_result_html("Error", "Fail", str(e), is_error=True)
+
+                if body.get("messages") and isinstance(body["messages"], list):
+                    body["messages"][-1]["content"] += f"\n\n{f'```html{html_out}```'}"
+
+            elif endpoint_key in ["health", "stats", "system", "system-info", "models", "live"]:
+                await self._emit_status(__event_emitter__, f"Fetching {endpoint_key}...", False)
+                
+                if endpoint_key == "live":
+                    target = f"{base_url}/live"
+                elif endpoint_key in ["system", "system-info"]:
+                    target = f"{base_v1}/system-info"
+                else:
+                    target = f"{base_v1}/{endpoint_key}"
+                
+                try:
+                    resp = await client.get(target)
+                    try:
+                        content = json.dumps(resp.json(), indent=2)
+                    except:
+                        content = resp.text
+                    
+                    html_out = self._build_result_html(endpoint_key.title(), str(resp.status_code), content, is_error=(resp.status_code >= 400))
+                except Exception as e:
+                    html_out = self._build_result_html("Error", "Connect Fail", str(e), is_error=True)
 
                 if body.get("messages") and isinstance(body["messages"], list):
                     body["messages"][-1]["content"] += f"\n\n{f'```html{html_out}```'}"
 
             else:
-                await self._emit_status(
-                    __event_emitter__, "Fetching Telemetry...", False
-                )
-
+                await self._emit_status(__event_emitter__, "Fetching Dashboard...", False)
                 results = await asyncio.gather(
-                    self._request_with_fallback(
-                        client, "GET", base_candidates, "/health"
-                    ),
-                    self._request_with_fallback(
-                        client, "GET", base_candidates, "/stats"
-                    ),
-                    self._request_with_fallback(
-                        client, "GET", base_candidates, "/system-info"
-                    ),
-                    self._request_with_fallback(
-                        client, "GET", base_candidates, "/models"
-                    ),
-                    return_exceptions=True,
+                    client.get(f"{base_v1}/health"),
+                    client.get(f"{base_v1}/stats"),
+                    client.get(f"{base_v1}/system-info"),
+                    client.get(f"{base_v1}/models"),
+                    return_exceptions=True
                 )
-
+                
                 data = []
                 for res in results:
                     if isinstance(res, Exception):
                         data.append({"error": str(res)})
-                    elif hasattr(res, "status_code") and res.status_code != 200:
-                        data.append(
-                            {"error": f"HTTP {res.status_code}", "text": res.text}
-                        )
-                    elif hasattr(res, "json"):
+                    elif hasattr(res, 'status_code') and res.status_code != 200:
+                        data.append({"error": f"HTTP {res.status_code}", "text": res.text})
+                    elif hasattr(res, 'json'):
                         try:
                             data.append(res.json())
                         except:
                             data.append({})
                     else:
                         data.append({})
-
+                
                 health_d, stats_d, system_d, models_d = data
 
                 html_dash = self._build_snapshot_html(
